@@ -176,6 +176,109 @@ CREATE TABLE IF NOT EXISTS public.audit_logs (
     CONSTRAINT fk_audit_logs_user FOREIGN KEY (user_id) REFERENCES public.users(id) ON DELETE SET NULL
 );
 
+-- New: User Preferences
+CREATE TABLE IF NOT EXISTS public.user_preferences (
+    id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    user_id UUID NOT NULL UNIQUE,
+    -- notification preferences
+    email_notifications BOOLEAN NOT NULL DEFAULT TRUE,
+    sms_notifications BOOLEAN NOT NULL DEFAULT FALSE,
+    push_notifications BOOLEAN NOT NULL DEFAULT FALSE,
+    -- app/theme preferences
+    theme VARCHAR(20) NOT NULL DEFAULT 'light',
+    language VARCHAR(10) NOT NULL DEFAULT 'en',
+    timezone VARCHAR(64) NOT NULL DEFAULT 'UTC',
+    -- flexible custom preferences
+    preferences JSONB,
+    created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    CONSTRAINT fk_user_preferences_user FOREIGN KEY (user_id) REFERENCES public.users(id) ON DELETE CASCADE
+);
+DO $$
+BEGIN
+    IF NOT EXISTS (
+        SELECT 1 FROM pg_trigger t
+        JOIN pg_class c ON c.oid = t.tgrelid
+        WHERE t.tgname = 'trg_user_preferences_updated_at' AND c.relname = 'user_preferences'
+    ) THEN
+        CREATE TRIGGER trg_user_preferences_updated_at
+        BEFORE UPDATE ON public.user_preferences
+        FOR EACH ROW
+        EXECUTE PROCEDURE public.set_updated_at();
+    END IF;
+END$$;
+
+-- New: Optional Waitlist for classes
+CREATE TABLE IF NOT EXISTS public.waitlist (
+    id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    class_id UUID NOT NULL,
+    member_id UUID NOT NULL,
+    position INTEGER NOT NULL CHECK (position > 0),
+    status VARCHAR(20) NOT NULL DEFAULT 'waiting' CHECK (status IN ('waiting','notified','joined','cancelled')),
+    created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    UNIQUE (class_id, member_id),
+    CONSTRAINT fk_waitlist_class FOREIGN KEY (class_id) REFERENCES public.classes(id) ON DELETE CASCADE,
+    CONSTRAINT fk_waitlist_member FOREIGN KEY (member_id) REFERENCES public.users(id) ON DELETE CASCADE
+);
+DO $$
+BEGIN
+    IF NOT EXISTS (
+        SELECT 1 FROM pg_trigger t
+        JOIN pg_class c ON c.oid = t.tgrelid
+        WHERE t.tgname = 'trg_waitlist_updated_at' AND c.relname = 'waitlist'
+    ) THEN
+        CREATE TRIGGER trg_waitlist_updated_at
+        BEFORE UPDATE ON public.waitlist
+        FOR EACH ROW
+        EXECUTE PROCEDURE public.set_updated_at();
+    END IF;
+END$$;
+
+-- New: Notification logs
+CREATE TABLE IF NOT EXISTS public.notification_logs (
+    id BIGSERIAL PRIMARY KEY,
+    user_id UUID,
+    channel VARCHAR(20) NOT NULL CHECK (channel IN ('email','sms','push','inapp')),
+    template VARCHAR(100),
+    subject VARCHAR(255),
+    body TEXT,
+    data JSONB,
+    sent_at TIMESTAMPTZ,
+    status VARCHAR(20) NOT NULL DEFAULT 'queued' CHECK (status IN ('queued','sent','failed','skipped')),
+    error TEXT,
+    created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    CONSTRAINT fk_notification_logs_user FOREIGN KEY (user_id) REFERENCES public.users(id) ON DELETE SET NULL
+);
+
+-- New: Scheduler jobs (for background processing)
+CREATE TABLE IF NOT EXISTS public.scheduler_jobs (
+    id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    job_name VARCHAR(100) NOT NULL,
+    job_type VARCHAR(50) NOT NULL, -- e.g., 'cron','once','retry'
+    schedule VARCHAR(100),         -- cron expression or ISO timestamp text
+    payload JSONB,                 -- job specific data
+    status VARCHAR(20) NOT NULL DEFAULT 'pending' CHECK (status IN ('pending','running','completed','failed','cancelled')),
+    last_run_at TIMESTAMPTZ,
+    next_run_at TIMESTAMPTZ,
+    run_count INTEGER NOT NULL DEFAULT 0 CHECK (run_count >= 0),
+    created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);
+DO $$
+BEGIN
+    IF NOT EXISTS (
+        SELECT 1 FROM pg_trigger t
+        JOIN pg_class c ON c.oid = t.tgrelid
+        WHERE t.tgname = 'trg_scheduler_jobs_updated_at' AND c.relname = 'scheduler_jobs'
+    ) THEN
+        CREATE TRIGGER trg_scheduler_jobs_updated_at
+        BEFORE UPDATE ON public.scheduler_jobs
+        FOR EACH ROW
+        EXECUTE PROCEDURE public.set_updated_at();
+    END IF;
+END$$;
+
 -- Useful indexes
 CREATE INDEX IF NOT EXISTS idx_users_email ON public.users (email);
 CREATE INDEX IF NOT EXISTS idx_users_role ON public.users (role);
@@ -188,6 +291,12 @@ CREATE INDEX IF NOT EXISTS idx_workouts_member_date ON public.workouts (member_i
 CREATE INDEX IF NOT EXISTS idx_payments_user_status ON public.payments (user_id, status);
 CREATE INDEX IF NOT EXISTS idx_refresh_tokens_user ON public.refresh_tokens (user_id);
 CREATE INDEX IF NOT EXISTS idx_audit_logs_action ON public.audit_logs (action);
+
+-- New indexes for added tables
+CREATE INDEX IF NOT EXISTS idx_user_preferences_user ON public.user_preferences (user_id);
+CREATE INDEX IF NOT EXISTS idx_waitlist_class_pos ON public.waitlist (class_id, position);
+CREATE INDEX IF NOT EXISTS idx_notification_logs_user_time ON public.notification_logs (user_id, created_at);
+CREATE INDEX IF NOT EXISTS idx_scheduler_jobs_status_next ON public.scheduler_jobs (status, next_run_at);
 
 -- Extensions (optional but helpful)
 DO $$

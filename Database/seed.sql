@@ -89,6 +89,57 @@ SELECT id, 4999, 'USD', 'completed', 'card', 'seed_txn_001'
 FROM public.users WHERE email='member1@example.com'
 ON CONFLICT DO NOTHING;
 
+-- Seed user_preferences for core users with sensible defaults
+INSERT INTO public.user_preferences (user_id, email_notifications, sms_notifications, push_notifications, theme, language, timezone, preferences)
+SELECT id, TRUE, FALSE, FALSE, 'light', 'en', 'UTC',
+       '{"dashboard":{"showTips":true},"booking":{"reminders":true}}'::jsonb
+FROM public.users
+WHERE email IN ('member1@example.com','trainer1@example.com','admin1@example.com')
+ON CONFLICT (user_id) DO UPDATE
+SET email_notifications = EXCLUDED.email_notifications,
+    sms_notifications = EXCLUDED.sms_notifications,
+    push_notifications = EXCLUDED.push_notifications,
+    theme = EXCLUDED.theme,
+    language = EXCLUDED.language,
+    timezone = EXCLUDED.timezone;
+
+-- Seed a waitlist entry for the earliest class, if capacity would be exceeded logically
+WITH cls AS (
+  SELECT id AS class_id, capacity FROM public.classes ORDER BY start_time LIMIT 1
+),
+member2 AS (
+  -- If there is no separate member2, we reuse the same member1 for idempotency and uniqueness handled by constraint
+  SELECT id AS member_id FROM public.users WHERE email='member1@example.com'
+),
+desired AS (
+  SELECT cls.class_id, member2.member_id,
+         COALESCE((
+           SELECT MAX(position) FROM public.waitlist w WHERE w.class_id = cls.class_id
+         ), 0) + 1 AS next_position
+  FROM cls, member2
+)
+INSERT INTO public.waitlist (class_id, member_id, position, status)
+SELECT class_id, member_id, next_position, 'waiting'
+FROM desired
+ON CONFLICT (class_id, member_id) DO NOTHING;
+
+-- Log a sample notification for seeding
+INSERT INTO public.notification_logs (user_id, channel, template, subject, body, data, sent_at, status)
+SELECT u.id, 'email', 'welcome', 'Welcome to Gym!', 'Hello and welcome!', '{"source":"seed"}'::jsonb, NOW(), 'sent'
+FROM public.users u
+WHERE u.email = 'member1@example.com'
+AND NOT EXISTS (
+  SELECT 1 FROM public.notification_logs nl
+  WHERE nl.user_id = u.id AND nl.template = 'welcome'
+);
+
+-- Seed scheduler jobs: a daily cleanup and a reminder dispatcher
+INSERT INTO public.scheduler_jobs (job_name, job_type, schedule, payload, status, next_run_at)
+VALUES
+  ('daily_cleanup', 'cron', '0 3 * * *', '{"task":"cleanup","retention_days":30}'::jsonb, 'pending', NOW() + INTERVAL '1 hour'),
+  ('booking_reminder_dispatch', 'cron', '*/15 * * * *', '{"task":"send_booking_reminders","lookahead_minutes":120}'::jsonb, 'pending', NOW() + INTERVAL '15 minutes')
+ON CONFLICT DO NOTHING;
+
 -- Sample audit log
 INSERT INTO public.audit_logs (user_id, action, entity_type, entity_id, metadata)
 SELECT id, 'SEED_INITIALIZE', 'system', 'seed-001', '{"note":"Initial dataset created"}'::jsonb
